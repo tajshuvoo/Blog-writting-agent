@@ -1,20 +1,37 @@
 from __future__ import annotations
 
-import json
 import re
 import zipfile
 from datetime import date
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Iterator, Tuple
+from typing import Any, Dict, List, Iterator, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# -----------------------------
-# Import compiled LangGraph app
-# -----------------------------
+from db import get_all_blogs, get_blog, init_db
 from backend import app
+
+
+# =============================
+# SAFE DB INIT (RUN ONCE)
+# =============================
+
+@st.cache_resource
+def initialize_db():
+    init_db()
+
+initialize_db()
+
+
+# =============================
+# CACHED BLOG LOADER
+# =============================
+
+@st.cache_data(ttl=30)
+def load_blogs():
+    return get_all_blogs()
 
 
 # =============================
@@ -63,37 +80,8 @@ def extract_latest_state(current_state: Dict[str, Any], payload: Any):
     return current_state
 
 
-# =============================
-# Markdown Renderer (FIXED)
-# =============================
-
 def render_md(md: str):
-    """
-    Proper markdown rendering with full LaTeX support.
-    DO NOT fragment markdown.
-    """
-
-    st.markdown(
-        md,
-        unsafe_allow_html=True,
-    )
-
-
-# =============================
-# Past Blogs Loader
-# =============================
-
-def list_blogs() -> List[Path]:
-    files = [
-        p for p in Path(".").glob("*.md")
-        if p.is_file() and p.name.lower() != "readme.md"
-    ]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return files
-
-
-def read_md(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace")
+    st.markdown(md, unsafe_allow_html=True)
 
 
 def extract_title(md: str, fallback: str) -> str:
@@ -104,52 +92,45 @@ def extract_title(md: str, fallback: str) -> str:
 
 
 # =============================
-# Streamlit UI
+# UI
 # =============================
 
-st.set_page_config(page_title="LangGraph Blog Writer", layout="wide")
-st.title("📝 LangGraph Blog Writing Agent")
+st.set_page_config(page_title="Blog Writer", layout="wide")
+st.title("Blog Writing Agent", text_alignment='center')
 
-# Sidebar
 with st.sidebar:
     st.header("Generate Blog")
     topic = st.text_area("Topic", height=120)
     as_of = st.date_input("As-of date", value=date.today())
-    run_btn = st.button("🚀 Generate", type="primary")
+    run_btn = st.button("Generate", type="primary")
 
     st.divider()
     st.subheader("📂 Past Blogs")
 
-    blogs = list_blogs()
+    blogs = load_blogs()
 
     if blogs:
-        labels = {}
-        for p in blogs:
-            md = read_md(p)
-            title = extract_title(md, p.stem)
-            label = f"{title} · {p.name}"
-            labels[label] = p
+        options = {
+            f"{b['title']} ({b['created_at']})": b["id"]
+            for b in blogs
+        }
 
         selected = st.radio(
             "Select blog",
-            list(labels.keys()),
+            list(options.keys()),
             label_visibility="collapsed"
         )
 
         if st.button("Load Blog"):
-            md = read_md(labels[selected])
-            st.session_state["last_out"] = {
-                "plan": None,
-                "evidence": [],
-                "final": md,
-            }
+            blog = get_blog(options[selected])
+            if blog and blog.get("payload"):
+                st.session_state["last_out"] = blog["payload"]
     else:
         st.caption("No saved blogs yet.")
 
 
-# Tabs
 tab_plan, tab_evidence, tab_preview, tab_logs = st.tabs(
-    ["🧩 Plan", "🔎 Evidence", "📝 Preview", "🧾 Logs"]
+    ["Plan", "Evidence", "Preview", "Logs"]
 )
 
 if "last_out" not in st.session_state:
@@ -194,7 +175,7 @@ if run_btn:
 
         elif kind == "final":
             st.session_state["last_out"] = payload
-            status.update(label="✅ Done", state="complete", expanded=False)
+            status.update(label="Done", state="complete", expanded=False)
 
 
 # =============================
@@ -205,12 +186,9 @@ out = st.session_state.get("last_out")
 
 if out:
 
-    # -------- Plan Tab --------
     with tab_plan:
         plan = out.get("plan")
-        if not plan:
-            st.info("No plan available.")
-        else:
+        if plan:
             if hasattr(plan, "model_dump"):
                 plan = plan.model_dump()
 
@@ -221,29 +199,23 @@ if out:
 
             tasks = plan.get("tasks", [])
             if tasks:
-                df = pd.DataFrame(tasks)
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(pd.DataFrame(tasks), use_container_width=True)
 
-    # -------- Evidence Tab --------
     with tab_evidence:
         evidence = out.get("evidence") or []
-        if not evidence:
-            st.info("No evidence returned.")
-        else:
+        if evidence:
             rows = []
             for e in evidence:
                 if hasattr(e, "model_dump"):
                     e = e.model_dump()
                 rows.append(e)
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        else:
+            st.info("No evidence returned.")
 
-    # -------- Preview Tab --------
     with tab_preview:
         final_md = out.get("final") or ""
-
-        if not final_md:
-            st.warning("No markdown output.")
-        else:
+        if final_md:
             render_md(final_md)
 
             title = extract_title(final_md, "blog")
@@ -263,8 +235,9 @@ if out:
                 f"{safe_slug(title)}_bundle.zip",
                 mime="application/zip",
             )
+        else:
+            st.warning("No markdown output.")
 
-    # -------- Logs Tab --------
     with tab_logs:
         st.text_area("Logs", "\n\n".join(logs[-50:]), height=500)
 

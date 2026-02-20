@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TypedDict, List, Optional, Literal, Annotated
 
 from pydantic import BaseModel, Field
-
+from db import save_blog
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
@@ -476,19 +476,31 @@ def worker_node(payload: dict) -> dict:
 # 8) Reducer (merge + save)
 # -----------------------------
 def reducer_node(state: State) -> dict:
-
     plan = state["plan"]
 
-    ordered_sections = [md for _, md in sorted(state["sections"], key=lambda x: x[0])]
+    # Order sections
+    ordered_sections = [
+        md for _, md in sorted(state["sections"], key=lambda x: x[0])
+    ]
+
     body = "\n\n".join(ordered_sections).strip()
     final_md = f"# {plan.blog_title}\n\n{body}\n"
 
-    filename = f"{plan.blog_title}.md"
-    Path(filename).write_text(final_md, encoding="utf-8")
+    # ---- Build DB payload (minimal + clean) ----
+    db_payload = {
+        "plan": plan.model_dump() if hasattr(plan, "model_dump") else plan,
+        "evidence": [
+            e.model_dump() if hasattr(e, "model_dump") else e
+            for e in state.get("evidence", [])
+        ],
+        "final": final_md,
+    }
 
-    return {"final": final_md}
+    # Save JSON (NOT just markdown)
+    save_blog(plan.blog_title, db_payload)
 
-
+    # Return for UI
+    return db_payload
 
 # -----------------------------
 # 9) Build graph
